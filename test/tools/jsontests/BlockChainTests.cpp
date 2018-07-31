@@ -40,6 +40,7 @@ namespace test {
 
 eth::Network ChainBranch::s_tempBlockchainNetwork = eth::Network::MainNetwork;
 eth::Network TestBlockChain::s_sealEngineNetwork = eth::Network::FrontierTest;
+TestBlockChain::MiningType getMiningType(json_spirit::mObject const& _testObj);
 json_spirit::mValue BlockchainTestSuite::doTests(json_spirit::mValue const& _input, bool _fillin) const
 {
 	json_spirit::mObject tests;
@@ -179,14 +180,14 @@ fs::path TransitionTestsSuite::suiteFillerFolder() const {
 	return fs::path("BlockchainTestsFiller") / "TransitionTests";
 }
 
-ChainBranch::ChainBranch(TestBlock const& _genesis): blockchain(_genesis)
+ChainBranch::ChainBranch(TestBlock const& _genesis, TestBlockChain::MiningType _miningType): blockchain(_genesis, _miningType)
 {
 	importedBlocks.push_back(_genesis);
 }
 
-void ChainBranch::reset()
+void ChainBranch::reset(TestBlockChain::MiningType _miningType)
 {
-	blockchain.reset(importedBlocks.at(0));
+    blockchain.reset(importedBlocks.at(0), _miningType);
 }
 
 void ChainBranch::restoreFromHistory(size_t _importBlockNumber)
@@ -223,9 +224,12 @@ json_spirit::mObject fillBCTest(json_spirit::mObject const& _input)
 	TestBlock genesisBlock(_input.at("genesisBlockHeader").get_obj(), _input.at("pre").get_obj());
 	genesisBlock.setBlockHeader(genesisBlock.blockHeader());
 
-	TestBlockChain testChain(genesisBlock);
+	TestBlockChain::MiningType miningType = getMiningType(_input);
+	TestBlockChain testChain(genesisBlock, miningType);
 	assert(testChain.getInterface().isKnown(genesisBlock.blockHeader().hash(WithSeal)));
 
+	if (_input.count("sealEngine"))
+		output["sealEngine"] = _input.at("sealEngine");
 	output["genesisBlockHeader"] = writeBlockHeaderToJson(genesisBlock.blockHeader());
 	output["genesisRLP"] = toHexPrefixed(genesisBlock.bytes());
 	BOOST_REQUIRE(_input.count("blocks"));
@@ -234,7 +238,7 @@ json_spirit::mObject fillBCTest(json_spirit::mObject const& _input)
 	size_t importBlockNumber = 0;
 	string chainname = "default";
 	string chainnetwork = "default";
-	std::map<string, ChainBranch*> chainMap = { {chainname , new ChainBranch(genesisBlock)}};
+	std::map<string, ChainBranch*> chainMap = { {chainname , new ChainBranch(genesisBlock, miningType)}};
 
 	if (_input.count("network") > 0)
 		output["network"] = _input.at("network");
@@ -277,7 +281,7 @@ json_spirit::mObject fillBCTest(json_spirit::mObject const& _input)
 			if (_input.count("noBlockChainHistory") == 0)
 			{
 				ChainBranch::forceBlockchain(chainnetwork);
-				chainMap[chainname]->reset();
+                chainMap[chainname]->reset(miningType);
 				ChainBranch::resetBlockchain();
 				chainMap[chainname]->restoreFromHistory(importBlockNumber);
 			}
@@ -285,7 +289,7 @@ json_spirit::mObject fillBCTest(json_spirit::mObject const& _input)
 		else
 		{
 			ChainBranch::forceBlockchain(chainnetwork);
-			chainMap[chainname] = new ChainBranch(genesisBlock);
+            chainMap[chainname] = new ChainBranch(genesisBlock, miningType);
 			ChainBranch::resetBlockchain();
 		}
 
@@ -415,9 +419,11 @@ void testBCTest(json_spirit::mObject const& _o)
 {
 	string testName = TestOutputHelper::get().testName();
 	TestBlock genesisBlock(_o.at("genesisBlockHeader").get_obj(), _o.at("pre").get_obj());
-	TestBlockChain blockchain(genesisBlock);
 
-	TestBlockChain testChain(genesisBlock);
+    TestBlockChain::MiningType miningType = getMiningType(_o);
+    eth::IncludeSeal includeSeal = (miningType == TestBlockChain::MiningType::Ethash || miningType == TestBlockChain::MiningType::Default) ? WithSeal : WithoutSeal;
+    TestBlockChain blockchain(genesisBlock, miningType);
+    TestBlockChain testChain(genesisBlock, miningType);
 	assert(testChain.getInterface().isKnown(genesisBlock.blockHeader().hash(WithSeal)));
 
 	if (_o.count("genesisRLP") > 0)
@@ -511,7 +517,7 @@ void testBCTest(json_spirit::mObject const& _o)
 		}
 
 		//Check that imported block to the chain is equal to declared block from test
-		bytes importedblock = testChain.getInterface().block(blockFromFields.blockHeader().hash(WithSeal));
+        bytes importedblock = testChain.getInterface().block(blockFromFields.blockHeader().hash(includeSeal));
 		TestBlock inchainBlock(toHex(importedblock));
 		checkBlocks(inchainBlock, blockFromFields, testName);
 
@@ -542,7 +548,7 @@ void testBCTest(json_spirit::mObject const& _o)
 
 	//Check lastblock hash
 	BOOST_REQUIRE((_o.count("lastblockhash") > 0));
-	string lastTrueBlockHash = toHexPrefixed(testChain.topBlock().blockHeader().hash(WithSeal));
+    string lastTrueBlockHash = toHexPrefixed(testChain.topBlock().blockHeader().hash(includeSeal));
 	BOOST_CHECK_MESSAGE(lastTrueBlockHash == _o.at("lastblockhash").get_str(),
 			testName + "Boost check: lastblockhash does not match " + lastTrueBlockHash + " expected: " + _o.at("lastblockhash").get_str());
 
@@ -837,6 +843,19 @@ mObject writeBlockHeaderToJson(BlockHeader const& _bi)
 	o["hash"] = toString(_bi.hash());
 	o = ImportTest::makeAllFieldsHex(o, true);
 	return o;
+}
+
+TestBlockChain::MiningType getMiningType(json_spirit::mObject const& _testObj)
+{
+    TestBlockChain::MiningType miningType = TestBlockChain::MiningType::Default;
+    if (_testObj.count("sealEngine") > 0)
+    {
+        if (_testObj.at("sealEngine") == eth::NoProof::name())
+            miningType = TestBlockChain::MiningType::NoProof;
+        else if (_testObj.at("sealEngine") == eth::Ethash::name())
+            miningType = TestBlockChain::MiningType::Ethash;
+    }
+    return miningType;
 }
 
 void checkExpectedException(mObject& _blObj, Exception const& _e)
